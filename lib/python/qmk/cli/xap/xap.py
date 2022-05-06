@@ -90,7 +90,7 @@ def log_xap_transaction(transaction, sent=True):
     # payload
     formatted += ' '.join(str(hex(i)) for i in transaction)
 
-    cli.log.debug('%s a transaction with data:\n%s' % (mode, formatted))
+    cli.log.debug('%s a transaction with data:\n%s', mode, formatted)
 
 
 def _hid_transaction(device, report):
@@ -112,7 +112,7 @@ def _merge_hid_reports(xap_transaction, hid_report):
         hid_report
 
     Returns:
-        _type_: _description_
+        xap_transaction with new data
     """
 
     # only add token and payload length headers on the 1st response HID report
@@ -218,8 +218,9 @@ def _xap_transaction(
             sent_report = header
             size = header_size
 
-    # if there's some data remaining, sent it
+    # if there's some data remaining, send it
     if size > header_size:
+        # pad with trailing zeros
         sent_report.extend([0x00] * (HID_REPORT_LENGTH-size))
         received_report = _hid_transaction(device, sent_report)
         received_transaction = _merge_hid_reports(received_transaction, received_report)
@@ -231,7 +232,6 @@ def _xap_transaction(
         return None
 
     # return response payload
-    # FIXME (elpekenin) can't we just `return response[4:]` ?
     received_transaction_len = int(received_transaction[3])
     return received_transaction[4:4 + received_transaction_len]
 
