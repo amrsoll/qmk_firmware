@@ -20,7 +20,7 @@ KEYCODE_MAP = {
 HID_REPORT_LENGTH  = 64 # size of each HID report
 TOKEN_LENGTH       = 2  # bytes on each XAP transaction used for the token (transaction id)
 PAYLOAD_LENGTH     = 1  # bytes on each XAP transaction used for specifying the payload length (also in bytes)
-MAX_PAYLOAD_LENGTH = 2 ** (8*PAYLOAD_LENGTH) # biggest payload supported in a transaction
+MAX_PAYLOAD_LENGTH = 128 # constrain in the specification to reduce RAM usage
 TIMEOUT            = 100 # timeout (in ms) we wait for an answer
 
 
@@ -67,6 +67,67 @@ def print_dotted_output(kb_info_json, prefix=''):
             cli.echo('    {fg_blue}%s{fg_reset}: %s', new_prefix, kb_info_json[key])
 
 
+def log_xap_transaction(transaction, sent=True):
+    """Logs a XAP transaction for debugging
+
+    Args:
+        sent: Whether this transaction is in our outbound
+    """
+
+    mode = 'Sending' if sent else 'Received'
+
+    # bytes 0&1 => token
+    formatted = f'Token: {hex(int.from_bytes(transaction[0:2], "little"))} | '
+
+    # byte 2 => PayLen / Flags
+    text = 'Payload length' if sent else 'Flags'
+    formatted += f'{text}: {hex(transaction[2])} | '
+
+    # byte 3 => PayLen when receiving
+    if not sent:
+        formatted += f'Payload length: {hex(transaction[3])} | '
+
+    # payload
+    formatted += ' '.join(str(hex(i)) for i in transaction)
+
+    cli.log.debug('%s a transaction with data:\n%s' % (mode, formatted))
+
+
+def _hid_transaction(device, report):
+    """Send an HID report and return its answer
+
+    Returns:
+        hid_report gotten from the keyboard
+    """
+
+    device.write(report)
+    return device.read(HID_REPORT_LENGTH, TIMEOUT)
+
+
+def _merge_hid_reports(xap_transaction, hid_report):
+    """Combine several HID reports into a single XAP transaction
+
+    Args:
+        xap_transaction
+        hid_report
+
+    Returns:
+        _type_: _description_
+    """
+
+    # only add token and payload length headers on the 1st response HID report
+    if not xap_transaction:
+        xap_transaction.extend(hid_report[:4])
+
+    # update flags on each HID report
+    xap_transaction[2] = hid_report[2]
+
+    # payload
+    xap_transaction.extend(hid_report[4:])
+
+    return xap_transaction
+
+
 def _xap_transaction(
         device,
         #sub, route,
@@ -85,27 +146,27 @@ def _xap_transaction(
 
     Args:
         device: connection to the XAP-capable device
+
+        # TODO remove these parameters (?)
         sub: XAP's functionality subsystem
         route: IDs representing the route to a handler
-        special: Represents if this message is a special one (fire&forget or broadcast at the moment)
 
-    Raises:
-        ValueError: when the special type is not valid
+        special: Represents if this message is a special one (`fire&forget` or `broadcast` at the moment)
 
     Returns:
         payload of the response
     """
 
     # convert payload to bytes
+    # TODO test if this works propperly
     payload = []
     for arg in args:
-        # if already in bytes just append
+        # if already in bytes just add at the end
         if isinstance(arg, bytes):
             payload.append(arg)
-
         elif isinstance(arg, bytearray):
             payload.extend(arg)
-
+        # otherwise convert it
         else:
             payload.extend(arg.to_bytes(2, byteorder='little'))
     payload_length = len(payload)
@@ -116,49 +177,63 @@ def _xap_transaction(
 
     # check special types of messages
     if special == 'forget':
-        token = 0x0000.to_bytes(TOKEN_LENGTH, byteorder='litle')
+        tok = 0x0000
     elif special == 'broadcast':
-        token = 0xFFFF.to_bytes(TOKEN_LENGTH, byteorder='little')
+        tok = 0xFFFF
     else:
-        tok = random.getrandbits(TOKEN_LENGTH * 8) # is there a reason why we randomize this instead of starting at 0 and adding 1 for each transaction?
-        token = token.to_bytes(TOKEN_LENGTH, byteorder='little')
+        tok = random.getrandbits(TOKEN_LENGTH * 8)
 
-    header = [token].extend(payload_length.to_bytes(PAYLOAD_LENGTH, 'little'))
+    # set up the header
+    token = tok.to_bytes(TOKEN_LENGTH, byteorder='little')
+    header = token.extend(payload_length.to_bytes(PAYLOAD_LENGTH, 'little'))
     header_size = len(header)
 
+    # initialize header-only report
+    sent_report_size = header_size
+    sent_report = header
+
+    # initialize XAP response tracker
+    received_transaction = []
+
     # divide the XAP transaction into several HID reports
-    size = header_size
-    report = header
     for byte in payload:
-        report.append(byte)
-        size += 1
+        sent_report.append(byte)
+        sent_report_size += 1
 
-        if size == HID_REPORT_LENGTH:
-            device.write(report)
-            response = device.read(HID_REPORT_LENGTH, TIMEOUT)
+        if sent_report_size == HID_REPORT_LENGTH:
+            # TODO the logic in here might be combined into a single function
+            received_report = _hid_transaction(device, sent_report)
+
             # validate tok sent == resp
-            if str(token) != str(response[:2]):
+            if str(token) != str(received_report[:2]):
+                cli.log.critical("Token received doesn't match the sent one")
                 return None
-                # raise ValueError('Token received doesn\'t match the sent one')
 
-            # TODO: Flag logic, we could maybe stop the process when device is locked or something
-            # for now, nothing is done
+            # flag logic could maybe stop the process when device is locked or something
 
-            report = header
+            # merge all response HID reports into the response XAP transaction
+            received_transaction = _merge_hid_reports(received_transaction, received_report)
+
+            # reset the HID report
+            sent_report = header
             size = header_size
 
     # if there's some data remaining, sent it
     if size > header_size:
-        device.write(report)
-        response = device.read(HID_REPORT_LENGTH, TIMEOUT)
+        sent_report.extend([0x00] * (HID_REPORT_LENGTH-size))
+        received_report = _hid_transaction(device, sent_report)
+        received_transaction = _merge_hid_reports(received_transaction, received_report)
+
+    log_xap_transaction(received_transaction, sent=False)
 
     # check if the transaction ended successfully
-    if int(response[2]) != 0x01:
+    if int(received_transaction[2]) != 0x01:
         return None
 
     # return response payload
-    response_len = int(response[3])
-    return response[4:4 + response_len]     # can't we just `return response[4:]` ?
+    # FIXME (elpekenin) can't we just `return response[4:]` ?
+    received_transaction_len = int(received_transaction[3])
+    return received_transaction[4:4 + received_transaction_len]
 
 
 def _query_device(device):
@@ -343,7 +418,7 @@ def xap(cli):
 
     dev = devices[0]
     device = hid.Device(path=dev['path'])
-    cli.log.info("Connected to:%04x:%04x %s %s", dev['vendor_id'], dev['product_id'], dev['manufacturer_string'], dev['product_string'])
+    cli.log.info("Connected to %04x:%04x -- %s -- %s", dev['vendor_id'], dev['product_id'], dev['manufacturer_string'], dev['product_string'])
 
     # shell?
     if cli.args.interactive:
