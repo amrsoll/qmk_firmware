@@ -16,6 +16,13 @@ KEYCODE_MAP = {
     0xF9: 'KC_MS_WH_UP',
 }
 
+# should create a config file or read from XAP specification
+HID_REPORT_LENGTH  = 64 # size of each HID report
+TOKEN_LENGTH       = 2  # bytes on each XAP transaction used for the token (transaction id)
+PAYLOAD_LENGTH     = 1  # bytes on each XAP transaction used for specifying the payload length (also in bytes)
+MAX_PAYLOAD_LENGTH = 2 ** (8*PAYLOAD_LENGTH) # biggest payload supported in a transaction
+TIMEOUT            = 100 # timeout (in ms) we wait for an answer
+
 
 def _is_xap_usage(x):
     return x['usage_page'] == 0xFF51 and x['usage'] == 0x0058
@@ -60,46 +67,98 @@ def print_dotted_output(kb_info_json, prefix=''):
             cli.echo('    {fg_blue}%s{fg_reset}: %s', new_prefix, kb_info_json[key])
 
 
-def _xap_transaction(device, sub, route, *args):
-    # gen token
-    tok = random.getrandbits(16)
-    token = tok.to_bytes(2, byteorder='little')
+def _xap_transaction(
+        device,
+        #sub, route,
+        *args, special=""
+    ):
+    # im assuming sub and route are optional fields, and args is used to set the *entire* payload
 
-    # send with padding
-    # TODO: this code is total garbage
-    args_data = []
-    args_len = 2
-    if len(args) == 1:
-        if isinstance(args[0], (bytes, bytearray)):
-            args_len += len(args[0])
-            args_data = args[0]
+    # could maybe be changed to accept 1-key **kwargs so that we can use things like
+    #     broadcast=1
+    #     forget=True
+
+    """Sends XAP transaction
+
+    A XAP transaction can be up to 2**8 = 256 payload bytes, so we need to split it into several HID reports
+    Im assuming the keyboard will reply to each one, and we could stop transaction when a certain flag criteria is met
+
+    Args:
+        device: connection to the XAP-capable device
+        sub: XAP's functionality subsystem
+        route: IDs representing the route to a handler
+        special: Represents if this message is a special one (fire&forget or broadcast at the moment)
+
+    Raises:
+        ValueError: when the special type is not valid
+
+    Returns:
+        payload of the response
+    """
+
+    # convert payload to bytes
+    payload = []
+    for arg in args:
+        # if already in bytes just append
+        if isinstance(arg, bytes):
+            payload.append(arg)
+
+        elif isinstance(arg, bytearray):
+            payload.extend(arg)
+
         else:
-            args_len += 2
-            args_data = args[0].to_bytes(2, byteorder='little')
+            payload.extend(arg.to_bytes(2, byteorder='little'))
+    payload_length = len(payload)
 
-    padding_len = 64 - 3 - args_len
-    padding = b"\x00" * padding_len
-    if args_data:
-        padding = args_data + padding
-    buffer = token + args_len.to_bytes(1, byteorder='little') + sub.to_bytes(1, byteorder='little') + route.to_bytes(1, byteorder='little') + padding
+    # check if it fits in a single request
+    if payload_length > MAX_PAYLOAD_LENGTH:
+        raise ValueError('Payload is too big to fit in a single XAP transaction')
 
-    # prepend 0 on windows because reasons...
-    if 'windows' in platform().lower():
-        buffer = b"\x00" + buffer
+    # check special types of messages
+    if special == 'forget':
+        token = 0x0000.to_bytes(TOKEN_LENGTH, byteorder='litle')
+    elif special == 'broadcast':
+        token = 0xFFFF.to_bytes(TOKEN_LENGTH, byteorder='little')
+    else:
+        tok = random.getrandbits(TOKEN_LENGTH * 8) # is there a reason why we randomize this instead of starting at 0 and adding 1 for each transaction?
+        token = token.to_bytes(TOKEN_LENGTH, byteorder='little')
 
-    device.write(buffer)
+    header = [token].extend(payload_length.to_bytes(PAYLOAD_LENGTH, 'little'))
+    header_size = len(header)
 
-    # get resp
-    array_alpha = device.read(64, 100)
+    # divide the XAP transaction into several HID reports
+    size = header_size
+    report = header
+    for byte in payload:
+        report.append(byte)
+        size += 1
 
-    # validate tok sent == resp
-    if str(token) != str(array_alpha[:2]):
+        if size == HID_REPORT_LENGTH:
+            device.write(report)
+            response = device.read(HID_REPORT_LENGTH, TIMEOUT)
+            # validate tok sent == resp
+            if str(token) != str(response[:2]):
+                return None
+                # raise ValueError('Token received doesn\'t match the sent one')
+
+            # TODO: Flag logic, we could maybe stop the process when device is locked or something
+            # for now, nothing is done
+
+            report = header
+            size = header_size
+
+    # if there's some data remaining, sent it
+    if size > header_size:
+        device.write(report)
+        response = device.read(HID_REPORT_LENGTH, TIMEOUT)
+
+    # check if the transaction ended successfully
+    if int(response[2]) != 0x01:
         return None
-    if int(array_alpha[2]) != 0x01:
-        return None
 
-    payload_len = int(array_alpha[3])
-    return array_alpha[4:4 + payload_len]
+    # return response payload
+    response_len = int(response[3])
+    return response[4:4 + response_len]     # can't we just `return response[4:]` ?
 
 
 def _query_device(device):
@@ -238,7 +297,7 @@ class XAPShell(cmd.Cmd):
 
         keycode = _xap_transaction(self.device, 0x04, 0x02, data)
         keycode = int.from_bytes(keycode, "little")
-        print(f'keycode:{KEYCODE_MAP.get(keycode, "unknown")}[{keycode}]')
+        print(f'keycode:{KEYCODE_MAP.get(keycode, "unknown")}[{keycode}]') # according to guidelines we should not use f-strings :(
 
     def do_exit(self, line):
         """Quit shell

@@ -29,10 +29,11 @@ def xap_generate_docs(cli):
 
     output_doc = QMK_FIRMWARE / "docs" / "xap_protocol.md"
     with open(output_doc, "w", encoding='utf-8') as out_file:
-        out_file.write('''\
-# XAP Protocol Reference
-
-''')
+        out_file.write('' + \
+            '# XAP Protocol Reference\n' + \
+            '\n' +\
+            ''
+        )
 
         for file in reversed(sorted(docs_list)):
             ver = file.stem[4:]
