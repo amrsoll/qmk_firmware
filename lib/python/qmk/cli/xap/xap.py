@@ -18,7 +18,7 @@ KEYCODE_MAP = {
 }
 
 # should create a config file or read from XAP specification
-HID_REPORT_LENGTH  = 64 # size of each HID report
+HID_REPORT_LENGTH  = 32 # size of each HID report
 TOKEN_LENGTH       = 2  # bytes on each XAP transaction used for the token (transaction id)
 PAYLOAD_LENGTH     = 1  # bytes on each XAP transaction used for specifying the payload length (also in bytes)
 MAX_PAYLOAD_LENGTH = 128 # constrain in the specification to reduce RAM usage
@@ -30,7 +30,7 @@ def _is_xap_usage(x):
 
 
 def _is_filtered_device(x):
-    name = "%04x:%04x" % (x['vendor_id'], x['product_id'])
+    name = "%04X:%04X" % (x['vendor_id'], x['product_id'])
     return name.lower().startswith(cli.args.device.lower())
 
 
@@ -68,33 +68,44 @@ def print_dotted_output(kb_info_json, prefix=''):
             cli.echo('    {fg_blue}%s{fg_reset}: %s', new_prefix, kb_info_json[key])
 
 
-def log_xap_transaction(transaction, sent=True):
-    """Logs a XAP transaction for debugging
+def log_hid_report(report, sent=True):
+    """Logs an HID report for debugging
 
     Args:
-        sent: Whether this transaction is in our outbound
+        sent: Whether this report is in our outbound
     """
 
-    mode = 'Sending' if sent else 'Received'
-
+    mode = 'Received'
+    formatted = ''
+    if sent: # remove leading 0 for logging purposes
+        mode = 'Sending'
+        removed = report.pop(0)
+        formatted += f'Leading 0x00 | '
     # bytes 0&1 => token
-    formatted = f'Token: {hex(int.from_bytes(transaction[:2], "little"))} | '
+    formatted += f'Token: {hex(int.from_bytes(report[:2], "little"))} | '
+
+    # prepend the leading zero back, both kind of message's payload has the same alignment with this
+    # could use manually insert "0", but im inserting the popped value just in case
+    if sent:
+        report.insert(0, removed)
 
     # received bytes 2/3=> Flags / Payload length
-    if not sent:
-        formatted += f'Flags: {format(transaction[2], "b").zfill(8)} | '
-        offset = 3
-    # sent byte 2 => Payload length
     else:
-        offset = 2
+        formatted += f'Flags: {format(report[2], "b").zfill(8)} | '
 
-    formatted += f'Payload Length: {hex(transaction[offset])} | '
+    formatted += f'Payload Length: {hex(report[3])} | '
 
     # payload
-    formatted += ' '.join(str(hex(i)) for i in transaction[offset+1:])
+    formatted += ' '.join(str(hex(v)) for v in report[4:])
 
-    print(mode, "XAP ||", formatted)
-    cli.log.debug('%s XAP transaction:\n%s', mode, formatted)
+    formatted += f'({len(report)} bytes)'
+
+    # distinguiss in/out going data
+    if not sent:
+        formatted += '\n' + '-'*50
+
+    print(mode, "HID ||", formatted)
+    cli.log.debug('%s HID transaction:\n%s', mode, formatted)
 
 
 def _hid_transaction(device, report):
@@ -104,16 +115,21 @@ def _hid_transaction(device, report):
         hid_report gotten from the keyboard
     """
 
+    # pad with zeros if needed
+    report.extend([0x00] * (HID_REPORT_LENGTH+1-len(report)))
+
+    log_hid_report(report)
+
     device.write(bytes(report))
     hid_response = device.read(HID_REPORT_LENGTH, TIMEOUT)
 
-    # disabled because something is wrong with data alignment
+    log_hid_report(hid_response, sent=False)
 
-    # validate tok sent == resp
-    # if report[:2] != hid_response[:2]:
-    #     cli.log.critical("Token received doesn't match the sent one")
-    #     sys.exit()
-    #     # TODO implement logic upon received a "fail" message, just quits for now
+    # validate token received, remember the leading 0
+    if report[1:3] != hid_response[:2]:
+        # TODO implement logic upon received a "fail" message, just quits for now
+        cli.log.critical("Token received doesn't match the sent one")
+        sys.exit()
 
 
     # flag logic could maybe stop the process when device is locked or something
@@ -142,6 +158,47 @@ def _merge_hid_reports(xap_transaction, hid_report):
     xap_transaction.extend(hid_report[4:])
 
     return xap_transaction
+
+
+def log_xap_transaction(transaction, sent=True):
+    """Logs a XAP transaction for debugging
+
+    Args:
+        sent: Whether this transaction is in our outbound
+    """
+
+    mode = 'Received'
+    if sent: # remove leading 0 for logging purposes
+        mode = 'Sending'
+        removed = transaction.pop(0)
+
+    # bytes 0&1 => token
+    formatted = f'Token: {hex(int.from_bytes(transaction[:2], "little"))} | '
+
+    # if sending, prepend the leading zero back, both kind of message's payload has the same alignment wit this
+    if sent:
+        transaction = bytes(removed) + transaction
+
+    # received bytes 2/3=> Flags / Payload length
+    else:
+        formatted += f'Flags: {format(transaction[2], "b").zfill(8)} | '
+
+    formatted += f'Payload Length: {hex(transaction[3])} |'
+
+    # payload
+    for i, v in enumerate(transaction[4:], start=0):
+        formatted += f' {str(hex(v))}'
+
+        if i and i % (HID_REPORT_LENGTH-5) == 0: # split payload on HID sized block
+            formatted += " //"
+
+    formatted += f'({len(transaction)} bytes)'
+
+    if sent:
+        formatted += '\n' + '-'*50
+
+    print(mode, "XAP ||", formatted)
+    cli.log.debug('%s XAP transaction:\n%s', mode, formatted)
 
 
 def _xap_transaction(
@@ -194,11 +251,14 @@ def _xap_transaction(
     elif special == 'broadcast':
         tok = 0xFFFF
     else:
-        tok = random.getrandbits(TOKEN_LENGTH * 8)
+        tok = 0x9ABC
+        #tok = random.getrandbits(TOKEN_LENGTH * 8)
     token = tok.to_bytes(TOKEN_LENGTH, 'little')
 
     # set up the header
-    header = bytearray(token)
+    # we need a 0 at the start of outgoing HID reports because of how hid.write() works
+    header = bytearray([0x00])
+    header.extend(token)
     header.extend(payload_length.to_bytes(PAYLOAD_LENGTH, 'little'))
     header_size = len(header)
 
@@ -206,7 +266,7 @@ def _xap_transaction(
 
     # initialize header-only report
     sent_report_size = header_size
-    sent_report = header
+    sent_report = header.copy()
 
     # initialize XAP response tracker
     received_transaction = []
@@ -224,13 +284,11 @@ def _xap_transaction(
             received_transaction = _merge_hid_reports(received_transaction, received_report)
 
             # reset the HID report
-            sent_report = header
+            sent_report = header.copy()
             sent_report_size = header_size
 
     # if there's some data remaining, send it
     if sent_report_size > header_size:
-        # pad with trailing zeros
-        sent_report.extend([0x00] * (HID_REPORT_LENGTH-sent_report_size))
         received_report = _hid_transaction(device, sent_report)
         received_transaction = _merge_hid_reports(received_transaction, received_report)
 
@@ -300,7 +358,7 @@ def _list_devices():
         device = hid.Device(path=dev['path'])
 
         data = _query_device(device)
-        cli.log.info("  %04x:%04x %s %s [API:%s] %s", dev['vendor_id'], dev['product_id'], dev['manufacturer_string'], dev['product_string'], data['xap'], data['secure'])
+        cli.log.info("  %04X:%04X %s %s [API:%s] %s", dev['vendor_id'], dev['product_id'], dev['manufacturer_string'], dev['product_string'], data['xap'], data['secure'])
 
         if cli.config.general.verbose:
             # TODO: better formatting like "lsusb -v"?
@@ -427,12 +485,16 @@ def xap(cli):
 
     dev = devices[0]
     device = hid.Device(path=dev['path'])
-    cli.log.info("Connected to %04x:%04x -- %s -- %s", dev['vendor_id'], dev['product_id'], dev['manufacturer_string'], dev['product_string'])
+    cli.log.info("Connected to %04X:%04X -- %s -- %s", dev['vendor_id'], dev['product_id'], dev['manufacturer_string'], dev['product_string'])
 
     _xap_transaction(
         device,
-        0x00, # it works with another offset
-        ord('A'))
+        # *[0x01]*20,
+        # long XAP payload test (2 HID reports)
+        *[0x01]*28,
+        ord('A'),
+        *[0x01]*40
+    )
 
     sys.exit()
 
