@@ -98,7 +98,7 @@ def log_hid_report(report, sent=True):
     # payload
     formatted += ' '.join(str(hex(v)) for v in report[4:])
 
-    formatted += f'({len(report)} bytes)'
+    formatted += f' ({len(report)} bytes)'
 
     # distinguiss in/out going data
     if not sent:
@@ -116,7 +116,7 @@ def _hid_transaction(device, report):
     """
 
     # pad with zeros if needed
-    report.extend([0x00] * (HID_REPORT_LENGTH+1-len(report)))
+    report.extend([0x00] * (HID_REPORT_LENGTH-len(report)))
 
     log_hid_report(report)
 
@@ -177,7 +177,7 @@ def log_xap_transaction(transaction, sent=True):
 
     # if sending, prepend the leading zero back, both kind of message's payload has the same alignment wit this
     if sent:
-        transaction = bytes(removed) + transaction
+        transaction.insert(0, removed)
 
     # received bytes 2/3=> Flags / Payload length
     else:
@@ -186,13 +186,16 @@ def log_xap_transaction(transaction, sent=True):
     formatted += f'Payload Length: {hex(transaction[3])} |'
 
     # payload
-    for i, v in enumerate(transaction[4:], start=0):
+    counter = 4
+    for v in transaction[4:]:
         formatted += f' {str(hex(v))}'
+        counter += 1
 
-        if i and i % (HID_REPORT_LENGTH-5) == 0: # split payload on HID sized block
+        if counter == HID_REPORT_LENGTH: # split payload on HID sized block
             formatted += " //"
+            counter = 4
 
-    formatted += f'({len(transaction)} bytes)'
+    formatted += f' ({len(transaction)} bytes)'
 
     if sent:
         formatted += '\n' + '-'*50
@@ -491,9 +494,7 @@ def xap(cli):
         device,
         # *[0x01]*20,
         # long XAP payload test (2 HID reports)
-        *[0x01]*28,
-        ord('A'),
-        *[0x01]*40
+        *list(range(70))
     )
 
     sys.exit()
