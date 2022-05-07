@@ -200,7 +200,6 @@ def log_xap_transaction(transaction, sent=True):
     if sent:
         formatted += '\n' + '-'*50
 
-    print(mode, "XAP ||", formatted)
     cli.log.debug('%s XAP transaction:\n%s', mode, formatted)
 
 
@@ -254,8 +253,7 @@ def _xap_transaction(
     elif special == 'broadcast':
         tok = 0xFFFF
     else:
-        tok = 0x9ABC
-        #tok = random.getrandbits(TOKEN_LENGTH * 8)
+        tok = random.getrandbits(TOKEN_LENGTH * 8)
     token = tok.to_bytes(TOKEN_LENGTH, 'little')
 
     # set up the header
