@@ -113,6 +113,8 @@ bool xap_respond_dynamic_keymap_get_keycode(xap_token_t token, const void *data,
     xap_route_dynamic_keymap_get_keymap_keycode_arg_t *arg = (xap_route_dynamic_keymap_get_keymap_keycode_arg_t *)data;
 
     uint16_t keycode = dynamic_keymap_get_keycode(arg->layer, arg->row, arg->column);
+    keycode = pgm_read_byte(&keymaps[arg->layer][arg->row][arg->column]);
+
     return xap_respond_data(token, &keycode, sizeof(keycode));
 }
 
