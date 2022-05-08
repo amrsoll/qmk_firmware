@@ -104,7 +104,6 @@ def log_hid_report(report, sent=True):
     if not sent:
         formatted += '\n' + '-'*50
 
-    print(mode, "HID ||", formatted)
     cli.log.debug('%s HID transaction:\n%s', mode, formatted)
 
 
@@ -293,6 +292,10 @@ def _xap_transaction(
         received_report = _hid_transaction(device, sent_report)
         received_transaction = _merge_hid_reports(received_transaction, received_report)
 
+    # remove trailing zeroes according to the payload data header of the response
+    received_transaction_len = int(received_transaction[3])
+    received_transaction = received_transaction[:4+received_transaction_len]
+
     log_xap_transaction(received_transaction, sent=False)
 
     # check if the transaction ended successfully
@@ -300,8 +303,7 @@ def _xap_transaction(
         return None
 
     # return response payload
-    received_transaction_len = int(received_transaction[3])
-    return received_transaction[4:4 + received_transaction_len]
+    return received_transaction[4:]
 
 
 def _query_device(device):
@@ -490,9 +492,9 @@ def xap(cli):
 
     _xap_transaction(
         device,
-        # *[0x01]*20,
+        *range(28),
+        ord('A')
         # long XAP payload test (2 HID reports)
-        *list(range(70))
     )
 
     sys.exit()
