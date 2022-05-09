@@ -515,12 +515,14 @@ def xap_broadcast_listen(device):
     try:
         cli.log.info("Listening for XAP broadcasts...")
         while True:
-            array_alpha = device.read(64, 100)
-            if bytes(0xFFFF) == array_alpha[:2]:
+            array_alpha = device.read(64, TIMEOUT)
+            if b'\xFF\xFF' == array_alpha[:2]:
+                data_size = array_alpha[3]
+                data = bytes(reversed(array_alpha[4:4+data_size]))
                 if array_alpha[2] == 1:
-                    cli.log.info("  Broadcast: Secure[%02x]", array_alpha[4])
+                    cli.log.info(f"  Broadcast: Secure[{data}]")
                 else:
-                    cli.log.info("  Broadcast: type[%02x] data:[%02x]", array_alpha[2], array_alpha[4])
+                    cli.log.info(f"  Broadcast: type[{array_alpha[2]}] data:[{data}]")
     except KeyboardInterrupt:
         cli.log.info("Stopping...")
 
